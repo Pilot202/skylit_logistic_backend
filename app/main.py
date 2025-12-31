@@ -11,7 +11,7 @@ from typing import List
 import asyncio
 import os
 from dotenv import load_dotenv
-from pyngrok import ngrok
+
 
 load_dotenv()
 
