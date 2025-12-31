@@ -6,12 +6,28 @@ from .models import *
 from .gemini_service import parse_message
 from .whatsapp_service import send_whatsapp_message
 import requests
+from fastapi import WebSocket, WebSocketDisconnect
+from typing import List
+import asyncio
 import os
 from dotenv import load_dotenv
+from pyngrok import ngrok
 
 load_dotenv()
 
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # change later
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
 PHONE_ID = os.getenv("PHONE_ID")
@@ -105,6 +121,12 @@ def whatsapp_webhook(payload: dict, db: Session = Depends(get_db)):
             reply = f"ℹ️ Current stock for {product.sku}: {product.current_stock}"
 
         db.commit()
+        asyncio.create_task(manager.broadcast({
+        "sku": product.sku,
+        "stock": product.current_stock,
+        "seller": product.seller.name,
+        "action": ai_data["action"]
+    }))
 
         # Send reply and record it
         send_whatsapp_message(sender, reply)
@@ -137,4 +159,55 @@ def send_whatsapp(to: str, message: str):
 @app.get("/db-test")
 def db_test(db: Session = Depends(get_db)):
     return {"status": "connected"}
+
+
+
+
+from fastapi import WebSocket, WebSocketDisconnect
+from typing import List
+import asyncio
+
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: List[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        self.active_connections.remove(websocket)
+
+    async def broadcast(self, message: dict):
+        for ws in self.active_connections:
+            await ws.send_json(message)
+
+manager = ConnectionManager()
+
+
+@app.websocket("/ws/dashboard")
+async def dashboard_ws(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+
+@app.get("/admin/inventory")
+def get_inventory(db: Session = Depends(get_db)):
+    products = db.query(Product).join(Seller).all()
+    return [
+        {
+            "seller": p.seller.name,
+            "sku": p.sku,
+            "product_name": p.product_name,
+            "stock": p.current_stock
+        }
+        for p in products
+    ]
+
+
+
+
 
