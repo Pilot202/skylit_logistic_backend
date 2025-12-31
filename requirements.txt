@@ -1,0 +1,12 @@
+fastapi[all]
+uvicorn[standard]
+SQLAlchemy[asyncio]
+asyncpg
+pydantic
+requests
+python-multipart
+google-generativeai
+python-dotenv
+pytest
+psycopg2-binary
+httpx
