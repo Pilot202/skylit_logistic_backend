@@ -142,6 +142,111 @@ def whatsapp_webhook(payload: dict, db: Session = Depends(get_db)):
         print("Webhook error:", e)
         return {"status": "error"}
 
+
+@app.post('/webhook/twilio')
+async def twilio_webhook(request: Request, db: Session = Depends(get_db)):
+    """Handle incoming Twilio WhatsApp webhook (form-encoded).
+    Twilio sends fields like `From` and `Body` in form data.
+    """
+    try:
+        form = await request.form()
+        sender = form.get('From')
+        body = form.get('Body')
+        if not sender:
+            return PlainTextResponse('missing sender', status_code=400)
+        # Twilio uses prefix 'whatsapp:' in From
+        if sender.startswith('whatsapp:'):
+            sender_num = sender.split(':', 1)[1]
+        else:
+            sender_num = sender
+
+        ai_data = parse_message(body or '')
+
+        # Save incoming message
+        try:
+            db.add(Conversation(sender=sender_num, direction="in", message=body or ''))
+            db.commit()
+        except Exception:
+            db.rollback()
+
+        # Find product and act similar to Meta webhook flow
+        product = db.query(Product).join(Seller).filter(
+            Seller.name == ai_data["seller"],
+            Product.sku == ai_data["sku"]
+        ).first()
+
+        if not product:
+            reply = "❌ Product not found."
+            # send via Twilio
+            try:
+                from .twilio_service import send_whatsapp
+                send_whatsapp(sender_num, reply)
+            except Exception:
+                pass
+            try:
+                db.add(Conversation(sender=sender_num, direction="out", message=reply))
+                db.commit()
+            except Exception:
+                db.rollback()
+            return {"status": "error"}
+
+        if ai_data["action"] == "ADD":
+            product.current_stock += ai_data["qty"]
+            reply = f"✅ ADD completed. New stock for {product.sku}: {product.current_stock}"
+
+        elif ai_data["action"] == "SHIP":
+            if product.current_stock < ai_data["qty"]:
+                reply = "⚠️ Insufficient stock."
+                try:
+                    from .twilio_service import send_whatsapp
+                    send_whatsapp(sender_num, reply)
+                except Exception:
+                    pass
+                try:
+                    db.add(Conversation(sender=sender_num, direction="out", message=reply))
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                return {"status": "error"}
+
+            product.current_stock -= ai_data["qty"]
+            db.add(Transaction(
+                product_id=product.id,
+                type=TransactionType.OUTBOUND,
+                quantity=ai_data["qty"],
+                destination=ai_data["location"]
+            ))
+            reply = f"✅ SHIP completed. New stock for {product.sku}: {product.current_stock}"
+
+        else:
+            reply = f"ℹ️ Current stock for {product.sku}: {product.current_stock}"
+
+        db.commit()
+        asyncio.create_task(manager.broadcast({
+            "sku": product.sku,
+            "stock": product.current_stock,
+            "seller": product.seller.name,
+            "action": ai_data["action"]
+        }))
+
+        # Send reply and record it
+        try:
+            from .twilio_service import send_whatsapp
+            send_whatsapp(sender_num, reply)
+        except Exception:
+            pass
+        try:
+            db.add(Conversation(sender=sender_num, direction="out", message=reply))
+            db.commit()
+        except Exception:
+            db.rollback()
+
+        return {"status": "ok"}
+
+    except Exception as e:
+        print("Twilio webhook error:", e)
+        return {"status": "error"}
+
 def send_whatsapp(to: str, message: str):
     url = f"https://graph.facebook.com/v19.0/{PHONE_ID}/messages"
     headers = {
@@ -206,6 +311,15 @@ def get_inventory(db: Session = Depends(get_db)):
         }
         for p in products
     ]
+
+
+@app.post('/admin/test-broadcast')
+def test_broadcast(payload: dict):
+    """Trigger a test broadcast to connected dashboard websockets.
+    payload example: {"sku":"WID-A","stock":12,"seller":"Acme","action":"ADD"}
+    """
+    asyncio.create_task(manager.broadcast(payload))
+    return {"status": "broadcasted", "payload": payload}
 
 
 

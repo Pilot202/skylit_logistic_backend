@@ -10,3 +10,4 @@ python-dotenv
 pytest
 psycopg2-binary
 httpx
+twilio
