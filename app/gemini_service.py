@@ -74,6 +74,7 @@ def parse_message(text: str) -> dict:
             # Fallback: attempt a generic generate_content call
             response = genai.generate_content([SYSTEM_PROMPT, f"Message: {text}"])
             response_text = getattr(response, "text", None) or str(response)
+
         # Try direct JSON parse first, then attempt to extract first JSON object
         try:
             return json.loads(response_text)
@@ -84,11 +85,12 @@ def parse_message(text: str) -> dict:
                     return json.loads(m.group(1))
             except Exception as e:
                 logger.exception("Failed to extract JSON from Gemini response: %s", e)
+
         # Fall back to heuristic parser
         return _fallback_parse(text)
-        except Exception as e:
-                logger.exception("Gemini parse failed, using fallback parser: %s", e)
-                return _fallback_parse(text)
+    except Exception as e:
+        logger.exception("Gemini parse failed, using fallback parser: %s", e)
+        return _fallback_parse(text)
 
 
 def generate_reply(product_sku: str, ai_data: dict, current_stock: int, success: bool = True, reason: str = None) -> str:
