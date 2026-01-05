@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Depends, HTTPException, Request
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, Response
+from xml.sax.saxutils import escape
 from sqlalchemy.orm import Session
 from .database import get_db
 from .models import *
@@ -183,7 +184,7 @@ async def twilio_webhook(request: Request, db: Session = Depends(get_db)):
 
         if not product:
             reply = generate_reply(ai_data.get("sku", ""), ai_data, 0, success=False, reason="Product not found.")
-            # send via Twilio
+            # send via Twilio (best-effort) and also return TwiML so Twilio will reply immediately
             try:
                 from .twilio_service import send_whatsapp
                 send_whatsapp(sender_num, reply)
@@ -194,7 +195,8 @@ async def twilio_webhook(request: Request, db: Session = Depends(get_db)):
                 db.commit()
             except Exception:
                 db.rollback()
-            return {"status": "error"}
+            xml = "<?xml version='1.0' encoding='UTF-8'?><Response><Message>" + escape(reply) + "</Message></Response>"
+            return Response(content=xml, media_type="application/xml")
 
         if ai_data["action"] == "ADD":
             product.current_stock += ai_data["qty"]
@@ -213,7 +215,8 @@ async def twilio_webhook(request: Request, db: Session = Depends(get_db)):
                     db.commit()
                 except Exception:
                     db.rollback()
-                return {"status": "error"}
+                xml = "<?xml version='1.0' encoding='UTF-8'?><Response><Message>" + escape(reply) + "</Message></Response>"
+                return Response(content=xml, media_type="application/xml")
 
             product.current_stock -= ai_data["qty"]
             db.add(Transaction(
@@ -235,7 +238,7 @@ async def twilio_webhook(request: Request, db: Session = Depends(get_db)):
             "action": ai_data["action"]
         }))
 
-        # Send reply and record it
+        # Send reply and record it (best-effort). Also return TwiML response so Twilio replies immediately.
         try:
             from .twilio_service import send_whatsapp
             send_whatsapp(sender_num, reply)
@@ -247,7 +250,8 @@ async def twilio_webhook(request: Request, db: Session = Depends(get_db)):
         except Exception:
             db.rollback()
 
-        return {"status": "ok"}
+        xml = "<?xml version='1.0' encoding='UTF-8'?><Response><Message>" + escape(reply) + "</Message></Response>"
+        return Response(content=xml, media_type="application/xml")
 
     except Exception as e:
         print("Twilio webhook error:", e)
