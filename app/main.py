@@ -3,7 +3,7 @@ from fastapi.responses import PlainTextResponse
 from sqlalchemy.orm import Session
 from .database import get_db
 from .models import *
-from .gemini_service import parse_message
+from .gemini_service import parse_message, generate_reply
 from .whatsapp_service import send_whatsapp_message
 import requests
 from fastapi import WebSocket, WebSocketDisconnect
@@ -58,6 +58,12 @@ async def verify_webhook(request: Request):
         return PlainTextResponse(challenge or "", status_code=200)
 
     raise HTTPException(status_code=403)
+
+
+@app.get("/webhook/twilio")
+async def verify_twilio(request: Request):
+    """Simple GET endpoint for Twilio webhook sanity checks (returns 200 OK)."""
+    return PlainTextResponse("ok", status_code=200)
 # ---------------- WEBHOOK MESSAGE ----------------
 @app.post("/webhook/whatsapp")
 def whatsapp_webhook(payload: dict, db: Session = Depends(get_db)):
@@ -83,7 +89,7 @@ def whatsapp_webhook(payload: dict, db: Session = Depends(get_db)):
         ).first()
 
         if not product:
-            reply = "❌ Product not found."
+            reply = generate_reply(ai_data.get("sku", ""), ai_data, 0, success=False, reason="Product not found.")
             send_whatsapp_message(sender, reply)
             try:
                 db.add(Conversation(sender=sender, direction="out", message=reply))
@@ -94,11 +100,11 @@ def whatsapp_webhook(payload: dict, db: Session = Depends(get_db)):
 
         if ai_data["action"] == "ADD":
             product.current_stock += ai_data["qty"]
-            reply = f"✅ ADD completed. New stock for {product.sku}: {product.current_stock}"
+            reply = generate_reply(product.sku, ai_data, product.current_stock, success=True)
 
         elif ai_data["action"] == "SHIP":
             if product.current_stock < ai_data["qty"]:
-                reply = "⚠️ Insufficient stock."
+                reply = generate_reply(product.sku, ai_data, product.current_stock, success=False, reason="Insufficient stock.")
                 send_whatsapp_message(sender, reply)
                 try:
                     db.add(Conversation(sender=sender, direction="out", message=reply))
@@ -114,11 +120,11 @@ def whatsapp_webhook(payload: dict, db: Session = Depends(get_db)):
                 quantity=ai_data["qty"],
                 destination=ai_data["location"]
             ))
-            reply = f"✅ SHIP completed. New stock for {product.sku}: {product.current_stock}"
+            reply = generate_reply(product.sku, ai_data, product.current_stock, success=True)
 
         else:
             # CHECK or unknown: respond with current stock
-            reply = f"ℹ️ Current stock for {product.sku}: {product.current_stock}"
+            reply = generate_reply(product.sku, ai_data, product.current_stock, success=True)
 
         db.commit()
         asyncio.create_task(manager.broadcast({
@@ -176,7 +182,7 @@ async def twilio_webhook(request: Request, db: Session = Depends(get_db)):
         ).first()
 
         if not product:
-            reply = "❌ Product not found."
+            reply = generate_reply(ai_data.get("sku", ""), ai_data, 0, success=False, reason="Product not found.")
             # send via Twilio
             try:
                 from .twilio_service import send_whatsapp
@@ -196,7 +202,7 @@ async def twilio_webhook(request: Request, db: Session = Depends(get_db)):
 
         elif ai_data["action"] == "SHIP":
             if product.current_stock < ai_data["qty"]:
-                reply = "⚠️ Insufficient stock."
+                reply = generate_reply(product.sku, ai_data, product.current_stock, success=False, reason="Insufficient stock.")
                 try:
                     from .twilio_service import send_whatsapp
                     send_whatsapp(sender_num, reply)
@@ -216,10 +222,10 @@ async def twilio_webhook(request: Request, db: Session = Depends(get_db)):
                 quantity=ai_data["qty"],
                 destination=ai_data["location"]
             ))
-            reply = f"✅ SHIP completed. New stock for {product.sku}: {product.current_stock}"
+            reply = generate_reply(product.sku, ai_data, product.current_stock, success=True)
 
         else:
-            reply = f"ℹ️ Current stock for {product.sku}: {product.current_stock}"
+            reply = generate_reply(product.sku, ai_data, product.current_stock, success=True)
 
         db.commit()
         asyncio.create_task(manager.broadcast({
