@@ -1,9 +1,17 @@
 import os
+import warnings
 import json
 import re
 import logging
 
 logger = logging.getLogger(__name__)
+
+# Suppress known FutureWarning from deprecated google.generativeai package when present
+warnings.filterwarnings(
+    "ignore",
+    category=FutureWarning,
+    message="All support for the `google.generativeai` package has ended.*",
+)
 
 SYSTEM_PROMPT = """
 You are an inventory control AI.
@@ -132,3 +140,48 @@ def generate_reply(product_sku: str, ai_data: dict, current_stock: int, success:
         if action == "SHIP":
             return f"✅ SHIP completed. New stock for {product_sku}: {current_stock}"
         return f"ℹ️ Current stock for {product_sku}: {current_stock}"
+
+
+def chat_response(text: str) -> str:
+    """Generate a short conversational reply for general messages using Gemini.
+    Falls back to a simple friendly message when the model is unavailable.
+    """
+    try:
+        genai = None
+        try:
+            import google.genai as genai_new
+            genai = genai_new
+        except Exception:
+            try:
+                import google.generativeai as genai_old
+                genai = genai_old
+            except Exception:
+                genai = None
+
+        if genai is None:
+            raise RuntimeError("No Gemini client installed")
+
+        api_key = os.getenv("GEMINI_API_KEY")
+        if api_key:
+            try:
+                genai.configure(api_key=api_key)
+            except Exception:
+                pass
+
+        prompt = f"You are a helpful assistant. Reply concisely and politely to: {text}"
+
+        if hasattr(genai, "GenerativeModel"):
+            model = genai.GenerativeModel("gemini-2.5-flash")
+            response = model.generate_content([prompt])
+            reply_text = getattr(response, "text", None) or str(response)
+        else:
+            response = genai.generate_content([prompt])
+            reply_text = getattr(response, "text", None) or str(response)
+
+        for line in reply_text.splitlines():
+            if line.strip():
+                return line.strip()
+        return reply_text.strip()
+    except Exception:
+        logger.exception("Gemini chat failed, returning fallback reply")
+        return "Hello! How can I help you today?"
