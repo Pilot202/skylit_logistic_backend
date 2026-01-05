@@ -42,23 +42,47 @@ def healthcheck():
 
 # ---------------- WEBHOOK VERIFICATION ----------------
 
-@app.get("/webhook/whatsapp")
-async def verify_webhook(request: Request):
-    params = request.query_params
+@app.post('/webhook/twilio')
+async def twilio_webhook(request: Request, db: Session = Depends(get_db)):
+    try:
+        form = await request.form()
+        sender = form.get('From')  # Example: "whatsapp:+2348012345678"
+        body = form.get('Body')
+        
+        if not sender:
+            return PlainTextResponse('missing sender', status_code=400)
 
-    # Support BOTH Meta & Swagger formats
-    mode = params.get("hub.mode") or params.get("hub_mode")
-    token = params.get("hub.verify_token") or params.get("hub_verify_token")
-    challenge = params.get("hub.challenge") or params.get("hub_challenge")
+        # Get the clean number for your Database
+        sender_num = sender.split(':', 1)[1] if ":" in sender else sender
 
-    print("MODE:", mode)
-    print("EXPECTED TOKEN:", VERIFY_TOKEN)
-    print("RECEIVED TOKEN:", token)
+        # Process message with AI
+        ai_data = parse_message(body or '')
 
-    if mode == "subscribe" and token == VERIFY_TOKEN:
-        return PlainTextResponse(challenge or "", status_code=200)
+        # ... (Your Database Logic for Product/Stock remains here) ...
 
-    raise HTTPException(status_code=403)
+        # Final Reply Text
+        reply = "Your generated reply here..." 
+
+        # 1. Save to Database
+        try:
+            db.add(Conversation(sender=sender_num, direction="out", message=reply))
+            db.commit()
+        except Exception:
+            db.rollback()
+
+        # 2. THE FIX: Return TwiML XML. 
+        # Twilio reads this and sends the WhatsApp message for you.
+        xml_reply = f"""<?xml version="1.0" encoding="UTF-8"?>
+        <Response>
+            <Message>{escape(reply)}</Message>
+        </Response>"""
+        
+        return Response(content=xml_reply, media_type="application/xml")
+
+    except Exception as e:
+        print("Twilio webhook error:", e)
+        # Even on error, return a valid (empty) TwiML so Twilio doesn't show an error
+        return Response(content="<Response></Response>", media_type="application/xml")
 
 
 @app.get("/webhook/twilio")
