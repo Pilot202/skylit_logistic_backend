@@ -1,187 +1,167 @@
 import os
-import warnings
-import json
-import re
 import logging
+from google import genai
+from google.genai import types
+from dotenv import load_dotenv
 
+load_dotenv()
+
+# Configure logging
 logger = logging.getLogger(__name__)
 
-# Suppress known FutureWarning from deprecated google.generativeai package when present
-warnings.filterwarnings(
-    "ignore",
-    category=FutureWarning,
-    message="All support for the `google.generativeai` package has ended.*",
-)
+# Configure Gemini API
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+client = None
 
+if GEMINI_API_KEY:
+    try:
+        client = genai.Client(api_key=GEMINI_API_KEY)
+    except Exception as e:
+        logger.error(f"Failed to initialize Gemini Client: {e}")
+else:
+    logger.warning("GEMINI_API_KEY not set. Gemini calls will fail.")
+
+# System prompt to guide the AI
 SYSTEM_PROMPT = """
-You are an inventory control AI.
-Convert messages into JSON only.
-Schema and respond in a professional tone:
-{
-  "action": "ADD | SHIP | CHECK",
-  "seller": "string",
-  "sku": "string",
-  "qty": number,
-  "location": "string"
-}
+You are an intelligent logistics assistant for Skylit Logistics, helping manage warehouse inventory via WhatsApp.
+
+**Your Capabilities:**
+1. CHECK STOCK: Answer questions about current inventory levels
+2. ADD STOCK: Help add new inventory (inbound shipments)
+3. SHIP STOCK: Process outbound shipments and reduce inventory
+4. GENERAL QUERIES: Answer questions about the system or provide help
+
+**Instructions:**
+- You have access to real-time inventory data provided in the context below
+- Be conversational, friendly, and professional
+- Use emojis appropriately (📦 for inventory, ✅ for success, ❌ for errors, 🚚 for shipping)
+- When users ask about stock, provide clear information with product names, SKUs, quantities, and sellers
+- When users want to add stock, confirm the action with details
+- When users want to ship items, verify availability first
+- If a product is not found, suggest similar products if available or ask for clarification
+- Keep responses concise and WhatsApp-friendly (avoid long paragraphs)
+- If the query is unclear, ask clarifying questions
+
+**Response Format:**
+- For stock checks: List products with quantities and sellers
+- For additions: Confirm what was added and new total
+- For shipments: Confirm what was shipped, destination, and remaining stock
+- For errors: Explain the issue clearly and suggest next steps
 """
 
-
-def _fallback_parse(text: str) -> dict:
-    # Very small heuristic parser for development / offline use
-    qty_match = re.search(r"(\d+)", text)
-    sku_match = re.search(r"SKU[:#]?\s*([A-Za-z0-9-]+)", text, re.IGNORECASE)
-    action = "CHECK"
-    if re.search(r"\b(add|received|restock)\b", text, re.IGNORECASE):
-        action = "ADD"
-    elif re.search(r"\b(ship|shipped|send|dispatched)\b", text, re.IGNORECASE):
-        action = "SHIP"
-
-    return {
-        "action": action,
-        "seller": "",
-        "sku": (sku_match.group(1) if sku_match else text.strip()),
-        "qty": int(qty_match.group(1)) if qty_match else 0,
-        "location": ""
-    }
-
-
-def parse_message(text: str) -> dict:
-    # Lazy import of the Gemini client to avoid import-time failures
-    try:
-        # Try newer package first if available; fall back to deprecated package.
-        genai = None
-        try:
-            import google.genai as genai_new
-            genai = genai_new
-        except Exception:
-            try:
-                import google.generativeai as genai_old
-                genai = genai_old
-            except Exception:
-                genai = None
-
-        if genai is None:
-            raise RuntimeError("No Gemini client installed")
-
-        # Configure API key (both libs use a configure pattern for our usage)
-        api_key = os.getenv("GEMINI_API_KEY")
-        if api_key:
-            try:
-                genai.configure(api_key=api_key)
-            except Exception:
-                # Some versions may not have configure; ignore
-                pass
-
-        # Use whichever API surface is available; try model.generate_content first
-        if hasattr(genai, "GenerativeModel"):
-            model = genai.GenerativeModel("gemini-2.5-flash")
-            response = model.generate_content([SYSTEM_PROMPT, f"Message: {text}"])
-            response_text = getattr(response, "text", None) or str(response)
-        else:
-            # Fallback: attempt a generic generate_content call
-            response = genai.generate_content([SYSTEM_PROMPT, f"Message: {text}"])
-            response_text = getattr(response, "text", None) or str(response)
-
-        # Try direct JSON parse first, then attempt to extract first JSON object
-        try:
-            return json.loads(response_text)
-        except Exception:
-            try:
-                m = re.search(r"(\{.*\})", response_text, re.DOTALL)
-                if m:
-                    return json.loads(m.group(1))
-            except Exception as e:
-                logger.exception("Failed to extract JSON from Gemini response: %s", e)
-
-        # Fall back to heuristic parser
-        return _fallback_parse(text)
-    except Exception as e:
-        logger.exception("Gemini parse failed, using fallback parser: %s", e)
-        return _fallback_parse(text)
-
-
-def generate_reply(product_sku: str, ai_data: dict, current_stock: int, success: bool = True, reason: str = None) -> str:
-    """Use Gemini to generate a user-facing reply message. Falls back to simple templates.
-
-    product_sku: SKU string
-    ai_data: parsed dict from `parse_message`
-    current_stock: resulting current stock
-    success: whether the operation succeeded
-    reason: optional failure reason text
+async def parse_message(text: str, inventory_summary: str = None) -> str:
+    """
+    Parse user message and return a structured intelligent response.
+    Uses real-time inventory data from the database.
+    Async to prevent blocking the event loop.
     """
     try:
-        import google.generativeai as genai
-        genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-        model = genai.GenerativeModel("gemini-2.5-flash")
-        prompt = (
-            f"You are an inventory assistant. The user performed: {ai_data}. "
-            f"The SKU is {product_sku}. The current stock is {current_stock}. "
-            f"The operation {'succeeded' if success else 'failed'}"
+        if not client:
+            return fallback_response(text)
+
+        # Use inventory summary from database
+        if not inventory_summary:
+            inventory_summary = "No inventory data available."
+
+        # Combine prompt and user text
+        full_prompt = f"{SYSTEM_PROMPT}\n\n{inventory_summary}\n\nUser Message: {text}"
+
+        # Use async generate_content
+        response = await client.aio.models.generate_content(
+            model="gemini-1.5-flash-latest",
+            contents=full_prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.7,
+                max_output_tokens=300
+            )
         )
-        if reason:
-            prompt += f" because: {reason}"
-        prompt += ". Reply in a single concise WhatsApp-friendly sentence."
-        response = model.generate_content([prompt])
-        reply_text = getattr(response, "text", None) or str(response)
-        # return the first non-empty line
-        for line in reply_text.splitlines():
-            if line.strip():
-                return line.strip()
-        return reply_text.strip()
-    except Exception:
-        logger.exception("Gemini generate_reply failed, using fallback message")
-        # Fallback templates
-        if not success:
-            return reason or "⚠️ Operation failed."
-        action = ai_data.get("action")
-        if action == "ADD":
-            return f"✅ ADD completed. New stock for {product_sku}: {current_stock}"
-        if action == "SHIP":
-            return f"✅ SHIP completed. New stock for {product_sku}: {current_stock}"
-        return f"ℹ️ Current stock for {product_sku}: {current_stock}"
+        
+        return response.text.strip()
+        
+    except Exception as e:
+        logger.error(f"Gemini parse failed, using fallback: {e}")
+        return fallback_response(text)
 
-
-def chat_response(text: str) -> str:
-    """Generate a short conversational reply for general messages using Gemini.
-    Falls back to a simple friendly message when the model is unavailable.
+async def classify_intent(text: str, inventory_summary: str = None) -> dict:
+    """
+    Classify user intent and extract parameters
+    Returns dict with intent type and extracted parameters
     """
     try:
-        genai = None
-        try:
-            import google.genai as genai_new
-            genai = genai_new
-        except Exception:
-            try:
-                import google.generativeai as genai_old
-                genai = genai_old
-            except Exception:
-                genai = None
+        if not client:
+            return {"intent": "UNKNOWN", "params": {}}
 
-        if genai is None:
-            raise RuntimeError("No Gemini client installed")
+        classification_prompt = f"""
+Analyze this user message and classify the intent. Return ONLY a JSON object with this structure:
+{{
+    "intent": "CHECK_STOCK" | "ADD_STOCK" | "SHIP_STOCK" | "GENERAL",
+    "sku": "product SKU if mentioned",
+    "quantity": number if mentioned,
+    "seller": "seller name if mentioned",
+    "destination": "destination if mentioned for shipping"
+}}
 
-        api_key = os.getenv("GEMINI_API_KEY")
-        if api_key:
-            try:
-                genai.configure(api_key=api_key)
-            except Exception:
-                pass
+Current Inventory:
+{inventory_summary or "No inventory data"}
 
-        prompt = f"You are a helpful assistant. Reply concisely and politely to: {text}"
+User Message: {text}
+"""
 
-        if hasattr(genai, "GenerativeModel"):
-            model = genai.GenerativeModel("gemini-2.5-flash")
-            response = model.generate_content([prompt])
-            reply_text = getattr(response, "text", None) or str(response)
-        else:
-            response = genai.generate_content([prompt])
-            reply_text = getattr(response, "text", None) or str(response)
+        response = await client.aio.models.generate_content(
+            model="gemini-1.5-flash-latest",
+            contents=classification_prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.3,
+                max_output_tokens=150
+            )
+        )
+        
+        # Try to parse JSON response
+        import json
+        result_text = response.text.strip()
+        # Remove markdown code blocks if present
+        if result_text.startswith("```"):
+            result_text = result_text.split("```")[1]
+            if result_text.startswith("json"):
+                result_text = result_text[4:]
+        
+        return json.loads(result_text.strip())
+        
+    except Exception as e:
+        logger.error(f"Intent classification failed: {e}")
+        return {"intent": "UNKNOWN", "params": {}}
 
-        for line in reply_text.splitlines():
-            if line.strip():
-                return line.strip()
-        return reply_text.strip()
-    except Exception:
-        logger.exception("Gemini chat failed, returning fallback reply")
-        return "Hello! How can I help you today?"
+
+async def chat_response(prompt: str) -> str:
+    """
+    General chat response using Gemini.
+    """
+    try:
+        if not client:
+            return fallback_response(prompt)
+            
+        full_prompt = f"{SYSTEM_PROMPT}\nUser Message: {prompt}"
+
+        response = await client.aio.models.generate_content(
+            model="gemini-1.5-flash-latest",
+            contents=full_prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.7,
+                max_output_tokens=250
+            )
+        )
+        return response.text.strip()
+        
+    except Exception as e:
+        logger.error(f"Gemini chat failed, returning fallback: {e}")
+        return fallback_response(prompt)
+
+def fallback_response(user_message: str) -> str:
+    """
+    Fallback response if Gemini fails or quota exceeded.
+    """
+    lower_msg = user_message.lower()
+    if any(k in lower_msg for k in ["stock", "product", "inventory", "available"]):
+        return "⚠ I couldn’t identify the product SKU or your query is unclear. Please provide product name and quantity."
+    else:
+        return "I’m here to assist you. Can you provide more details?"
