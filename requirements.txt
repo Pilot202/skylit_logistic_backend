@@ -5,7 +5,7 @@ asyncpg
 pydantic
 requests
 python-multipart
-google-generativeai
+google-genai>=1.56.0
 python-dotenv
 pytest
 psycopg2-binary
