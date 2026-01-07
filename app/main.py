@@ -34,6 +34,28 @@ app.add_middleware(
 )
 
 # -------------------------------------------------
+# Startup Event - Initialize Database
+# -------------------------------------------------
+
+@app.on_event("startup")
+async def startup_event():
+    """
+    Initialize database tables on startup
+    This ensures tables are created automatically when deployed to Railway
+    """
+    try:
+        from .database import engine, Base
+        from .models import Seller, Product, Staff, Transaction, Conversation
+        
+        logger.info("Creating database tables...")
+        Base.metadata.create_all(bind=engine)
+        logger.info("✅ Database tables created successfully!")
+        
+    except Exception as e:
+        logger.error(f"⚠️ Database initialization failed: {e}")
+        logger.warning("App will continue but database operations may fail")
+
+# -------------------------------------------------
 # Helpers
 # -------------------------------------------------
 
